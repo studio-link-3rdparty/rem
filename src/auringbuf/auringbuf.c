@@ -1,7 +1,6 @@
 /**
  * @file auringbuf.c  Audio Circular Buffer
  */
-
 #include <string.h>
 #include <re.h>
 #include <rem_auringbuf.h>
@@ -18,9 +17,7 @@ struct auringbuf {
 	size_t max_sz;
 	size_t pos_write;
 	size_t pos_read;
-	size_t max_read;
 	struct mbuf *mb;
-	bool filling;
 	uint64_t ts;
 
 #if AURINGBUF_DEBUG
@@ -71,8 +68,6 @@ int auringbuf_alloc(struct auringbuf **abp, size_t min_sz, size_t max_sz)
 	ab->max_sz = max_sz;
 	ab->pos_write = 0;
 	ab->pos_read = 0;
-	ab->max_read = 0;
-	ab->filling = true;
 	ab->mb = mbuf_alloc(max_sz);
 
  out:
@@ -97,6 +92,7 @@ int auringbuf_alloc(struct auringbuf **abp, size_t min_sz, size_t max_sz)
 int auringbuf_write(struct auringbuf *ab, const uint8_t *p, size_t sz)
 {
 	int err = 0;
+	size_t diff;
 
 	lock_write_get(ab->lock);
 
@@ -109,10 +105,18 @@ int auringbuf_write(struct auringbuf *ab, const uint8_t *p, size_t sz)
 		goto out;
 	}
 
+	diff = ab->max_sz - ab->pos_write;
 	/* Prevent overflow, turnover and tell read new max */
-	if ((ab->pos_write + sz) > ab->max_sz) {
-		ab->max_read = ab->pos_write;
-		ab->pos_write = 0;
+	if (diff < sz) {
+		ab->mb->pos = ab->pos_write;
+		err = mbuf_write_mem(ab->mb, p, diff);
+
+		ab->mb->pos = 0;
+		err = mbuf_write_mem(ab->mb, p + diff, (sz - diff));
+
+		ab->pos_write = sz - diff;
+		ab->cur_sz += sz;
+		goto out;
 	}
 
 	ab->mb->pos = ab->pos_write;
@@ -145,13 +149,13 @@ void auringbuf_read(struct auringbuf *ab, uint8_t *p, size_t sz)
 
 	lock_write_get(ab->lock);
 
-	if (ab->max_read)
-		max = ab->max_read;
-	else 
-		max = ab->max_sz;
+	max = ab->max_sz;
 
-	if ((ab->cur_sz - sz) < ab->wish_sz) {
+	if (ab->cur_sz < sz) {
 		//Underrun fill with zeros
+		(void)re_printf("auringbuf underrun: %ld\n",
+				sz);
+		memset(p, 0, sz);
 		goto out;	
 	}
 
@@ -159,9 +163,8 @@ void auringbuf_read(struct auringbuf *ab, uint8_t *p, size_t sz)
 	if ((ab->pos_read + sz) > max) {
 		size_t left = max - ab->pos_read;
 		(void)mbuf_read_mem(ab->mb, p, left);
-
 		ab->mb->pos = 0;
-		(void)mbuf_read_mem(ab->mb, (p + left), (sz - left));
+		(void)mbuf_read_mem(ab->mb, p + left, (sz - left));
 		ab->pos_read = sz - left;
 	} else {
 		(void)mbuf_read_mem(ab->mb, p, sz);
@@ -233,7 +236,6 @@ void auringbuf_flush(struct auringbuf *ab)
 
 	lock_write_get(ab->lock);
 
-	ab->filling = true;
 	ab->cur_sz  = 0;
 	ab->ts      = 0;
 	ab->pos_read = 0;
@@ -259,8 +261,8 @@ int auringbuf_debug(struct re_printf *pf, const struct auringbuf *ab)
 		return 0;
 
 	lock_read_get(ab->lock);
-	err = re_hprintf(pf, "wish_sz=%zu cur_sz=%zu filling=%d",
-			 ab->wish_sz, ab->cur_sz, ab->filling);
+	err = re_hprintf(pf, "wish_sz=%zu cur_sz=%zu",
+			 ab->wish_sz, ab->cur_sz);
 
 #if AURINGBUF_DEBUG
 	err |= re_hprintf(pf, " [overrun=%zu underrun=%zu]",
