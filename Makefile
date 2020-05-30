@@ -29,7 +29,7 @@ include $(LIBRE_MK)
 # List of modules
 MODULES += fir goertzel
 MODULES += g711
-MODULES += aubuf aufile auresamp autone dtmf
+MODULES += aubuf auringbuf aufile auresamp autone dtmf
 MODULES += au auconv
 
 ifneq ($(HAVE_LIBPTHREAD),)
